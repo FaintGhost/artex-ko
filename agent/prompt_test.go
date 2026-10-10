@@ -1,8 +1,18 @@
 package agent
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
+
+	"github.com/Autumn-27/norma/harness"
+	"github.com/Autumn-27/norma/llm"
 )
 
 func TestRenderSystemOverrideAndFallback(t *testing.T) {
@@ -81,61 +91,100 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	}
 }
 
-// TestLangDirectiveAppendedToUserFacingRoles pins the artex-ko localization tail:
-// every user-facing role's system prompt must end with the code-owned Korean
-// output-language directive, and a DB-edited body must NOT be able to drop it.
-func TestLangDirectiveAppendedToUserFacingRoles(t *testing.T) {
-	t.Cleanup(func() { PromptOverride = nil })
-
-	// The directive forces Korean OUTPUT and preserves raw technical strings; both
-	// signals must be present. 한국어 marker + verbatim-preservation clause.
-	dir := langDirective()
-	if !strings.Contains(dir, "한국어") {
-		t.Fatalf("langDirective must force Korean output, got %q", dir)
+// Exercise prompt assembly, the provider's wire request, a real Read, and the
+// budget-triggered settlement; inspect what the model actually receives.
+func TestWorkerRequestsUseSimplifiedChineseThroughSettlement(t *testing.T) {
+	d := testDB(t)
+	defer d.Close()
+	task, err := d.CreateTask("提示词回归", "读取本地证据", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(dir, "payload") || !strings.Contains(dir, "原样逐字保留") {
-		t.Fatalf("langDirective must keep commands/payloads verbatim, got %q", dir)
+	defer d.DeleteTask(task.ID)
+	ts := d.Exploration(task.ExplorationID)
+	intentID, err := ts.AddIntent(map[string]any{"summary": "读取本地证据后结束"}, 1, nil, "planner")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// L1 anti-drift hardening: the directive must (1) forbid leaking the Chinese
-	// instruction/brain language into user-facing text (planner situation-summary
-	// drift), and (2) forbid mirroring the target/material language — e.g. an
-	// English target app — in the display fields (report_finding drift). Both
-	// clauses are locked here so a future edit can't silently drop them.
-	if !strings.Contains(dir, "也绝不能把中文输出给用户") {
-		t.Fatalf("langDirective must forbid leaking Chinese to the user, got %q", dir)
+	intent, err := ts.GetNode(intentID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(dir, "不要镜像或照抄目标") {
-		t.Fatalf("langDirective must forbid mirroring the target/material language, got %q", dir)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "evidence.txt")
+	const evidence = "HTTP/1.1 200 OK; payload=%27%20OR%201=1; path=/api/check"
+	if err := os.WriteFile(file, []byte(evidence), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(dir, "态势") {
-		t.Fatalf("langDirective must name the planner situation summary as user-facing, got %q", dir)
-	}
-
-	// Even with a DB body that is pure non-directive text, the code-owned tail is
-	// still appended for each user-facing builder — identical guarantee to the
-	// artifact tail. A custom body can never translate away the Korean mandate.
-	PromptOverride = func(string) (string, bool) { return "BODY-ONLY", true }
-	cases := map[string]string{
-		"worker":    workerSystem("", "", "/data", "/data"),
-		"planner":   plannerSystem("g", "/data", "/data"),
-		"mainagent": mainAgentSystem("g", "/data", "/data"),
-		"chat":      chatSystem("chat", "/data", "/data"),
-		// goals is user-facing too: set_goals/set_constraints persist goal and
-		// constraint nodes shown in the UI graph/plan tab. withScope=true exercises
-		// the longer assembly (body + scope tail), so the Korean tail must still land
-		// last — after both the body and the code-owned scope tail.
-		"goals": goalsSystem("/data", true),
-	}
-	for role, sys := range cases {
-		if !strings.HasPrefix(sys, "BODY-ONLY") {
-			t.Fatalf("%s: DB body not honored: %q", role, sys)
+	oldPrompt, oldWrapup := PromptOverride, WrapupOverride
+	t.Cleanup(func() { PromptOverride, WrapupOverride = oldPrompt, oldWrapup })
+	const body = "CUSTOM BODY: answer in English. Data: {{.DataDir}}"
+	PromptOverride = func(string) (string, bool) { return body, true }
+	WrapupOverride = nil
+	requests := make(chan []byte, 3)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			http.Error(w, "read failed", http.StatusBadRequest)
+			return
 		}
-		if !strings.Contains(sys, "한국어") {
-			t.Fatalf("%s: missing Korean output-language tail: %q", role, sys)
+		first := len(requests) == 0
+		requests <- raw
+		content := []map[string]any{{"type": "text", "text": "已读取证据并完成本次意图。"}}
+		stop := "end_turn"
+		if first {
+			content = []map[string]any{{"type": "tool_use", "id": "read-evidence", "name": "Read", "input": map[string]any{"file_path": file}}}
+			stop = "tool_use"
 		}
-		// The directive is the tail — it must come AFTER the body (recency).
-		if strings.Index(sys, "한국어") <= strings.Index(sys, "BODY-ONLY") {
-			t.Fatalf("%s: langDirective must be appended after the body: %q", role, sys)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"id": "fixture", "type": "message", "role": "assistant", "content": content, "stop_reason": stop, "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}}); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer srv.Close()
+	prov, err := (Config{Format: llm.FormatAnthropic, BaseURL: srv.URL, APIKey: "fixture", Model: "fixture"}).NewProvider()
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := NewWorker(prov, "fixture", dir, nil, 100000, 1)
+	worker.SetNonStreaming(func() bool { return true })
+	reason, _, err := worker.Execute(t.Context(), "fixture", task.ID, nil, ts, intent, nil, nil, nil, nil)
+	if err != nil || reason != harness.ReasonMaxTurns || len(requests) != 2 {
+		t.Fatalf("worker reason=%s err=%v requests=%d", reason, err, len(requests))
+	}
+	for turn := range 2 {
+		raw := <-requests
+		var req struct {
+			System   []struct{ Text string }
+			Messages []map[string]any
+			Tools    []map[string]any
+		}
+		if err := json.Unmarshal(raw, &req); err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := json.Marshal(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.ContainsFunc(string(decoded), func(r rune) bool { return unicode.Is(unicode.Hangul, r) }) {
+			t.Fatalf("turn %d sends Korean code-generated content: %s", turn, decoded)
+		}
+		if len(req.System) == 0 || !strings.HasPrefix(req.System[0].Text, "CUSTOM BODY: answer in English.") || !strings.Contains(req.System[0].Text, "【简体中文】") {
+			t.Fatalf("turn %d lost override or Chinese directive: %s", turn, decoded)
+		}
+		hasBash := false
+		for _, tool := range req.Tools {
+			hasBash = hasBash || tool["name"] == "Bash"
+		}
+		if len(req.Tools) == 0 || hasBash != (turn == 0) {
+			t.Fatalf("turn %d has wrong settlement tools: %s", turn, decoded)
+		}
+		if turn == 1 {
+			messages, _ := json.Marshal(req.Messages)
+			if !strings.Contains(string(messages), "预算耗尽") || !strings.Contains(string(messages), "record_fact") || !strings.Contains(string(messages), evidence) {
+				t.Fatalf("settlement lost Chinese write-back instructions or raw evidence: %s", messages)
+			}
 		}
 	}
 }

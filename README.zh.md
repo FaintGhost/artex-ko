@@ -88,14 +88,23 @@ cd ARTEX
 ### 方式二：Docker Compose（手动）
 
 ```bash
-git clone https://github.com/Autumn-27/ARTEX.git
-cd ARTEX
-cp .env.example .env          # 填 POSTGRES_PASSWORD、可选 ANTHROPIC_API_KEY
-docker compose up -d          # 拉取 autumn27/artex 镜像 + postgres
-# → http://localhost:8787
+git clone https://github.com/FaintGhost/artex-ko.git
+cd artex-ko
+cp .env.example .env          # 设置随机 POSTGRES_PASSWORD；LLM 密钥也可稍后在 UI 中填写
+# 本地编译此分支（需要 Go 1.26.3+、Node.js/npm）
+printf 'NEXT_PUBLIC_LOCALE=zh\n' > web/.env.local
+npm --prefix web ci && npm --prefix web run build:static
+mkdir -p server/webui/dist && cp -a web/out/. server/webui/dist/
+ARTEX_SKIP_FRONTEND=1 ARTEX_BUILD_VERSION=dev ARTEX_OUTPUT=dist/arm64/artex ./build.sh --target linux/arm64
+docker compose up -d --build --wait
+# → http://localhost:18787/setup（首次设置需输入启动日志中的设置令牌）
 ```
 
 镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
+
+本目录的 Compose 使用本地构建的 `artex-ko:local`；`web/.env.local` 中的 `NEXT_PUBLIC_LOCALE=zh` 在前端构建时选择简体中文界面，重启容器不会改变该语言。本地后端也已将共享 Agent 输出要求、默认收尾/任务超时提示词、模板变量说明及预置报告 Agent 标签改为简体中文；命令、代码、URL 和证据原文保持不变。升级时只迁移与旧韩语默认值完全相同的报告 Agent 名称/说明，保留自定义内容、任务、LLM 配置和提示词版本，历史执行记录不重写。上述命令对应 ARM64 主机；AMD64 主机请将两个 `arm64` 改为 `amd64`。Web 映射到 `18787`，流量代理仅监听 `127.0.0.1:18788`，以避开现有服务的 `8787/8788`。日常启动用 `docker compose up -d`；查看日志用 `docker compose logs -f artex`。
+
+此中文版维护于 `FaintGhost/artex-ko`，上游为 `jiwoochris/artex-ko`。本地将 `origin` 指向个人 fork、`upstream` 指向上游；更新时先提交本地修改，再执行 `git fetch upstream && git merge upstream/main`，保留中文定制并通过测试、构建后推送 `origin main`。
 
 远程 MCP 可在系统设置中选择 `http`（Streamable HTTP）或 `sse`（旧版 SSE）。
 旧版 SSE 服务通常使用 `GET /sse` 建立事件流，再通过服务返回的
@@ -229,7 +238,7 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 ### 首次运行保护（设置令牌与绑定地址，本分支新增）
 
 - **设置令牌**：尚未设置密码时，启动日志会打印一行 `[auth] … 설정 토큰: …`（设置令牌；Docker 用 `docker compose logs artex` 查看）。`/setup` 与 `POST /api/auth/init`（`setup_token` 字段）必须带上该值才能创建密码，错误尝试会被限速。无人值守部署可用 `ARTEX_SETUP_TOKEN` 固定令牌，或用 `ARTEX_ADMIN_PASSWORD` 直接设置密码（至少 8 位）。
-- **默认只绑定 127.0.0.1**：`-addr` 默认值与 `docker-compose.yml` 的端口发布都只开在本机回环地址。需要从其他机器访问时改为 `-addr :8787` 或在 `.env` 中设置 `ARTEX_BIND=0.0.0.0`，但请先完成初始设置，并优先使用下方的反向代理方案。
+- **绑定地址**：单二进制的 `-addr` 默认值为 `127.0.0.1:8787`。本地 Compose 保留现有 `18787` Web 端口和对外访问方式，可在 `.env` 中设置 `ARTEX_BIND=127.0.0.1` 限制为本机访问；复制 `.env.example` 的新部署默认采用此限制。流量代理始终只发布到 `127.0.0.1:18788`。对外开放前请完成初始设置，并优先使用下方的反向代理方案。
 - **修改密码会使所有旧会话失效**：令牌签名密钥与密码哈希绑定，无论通过界面、`reset-password.sh` 还是直接改库，旧令牌都会在几秒内失效。
 - **CORS**：`/api` 仅允许 `ARTEX_CORS_ORIGINS`（逗号分隔）中列出的来源跨域调用；内置 UI 同源，通常留空。
 

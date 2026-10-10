@@ -77,14 +77,14 @@ const (
 	errMgmtTaskHasAgents = "실행 중인 에이전트가 남아 있어 작업 삭제를 취소했습니다"
 
 	// 에이전트 CRUD
-	errMgmtAgentKeyFormat     = "key 는 소문자로 시작하고, 소문자·숫자·밑줄만 사용할 수 있습니다"
-	errMgmtNameEmpty          = "이름은 비워 둘 수 없습니다"
-	errMgmtAgentKeyExists     = "이미 존재하는 key 입니다"
-	errMgmtBuiltinNoEditMeta  = "내장 에이전트는 이름/설명을 수정할 수 없습니다"
-	errMgmtBuiltinNoDelete    = "내장 에이전트는 삭제할 수 없습니다"
-	errMgmtLLMProfileIDFormat = "llm_profile_id 형식이 올바르지 않습니다"
-	errMgmtLLMProfileInvalid  = "지정한 LLM 설정이 존재하지 않거나 유효하지 않습니다"
-	errMgmtNoBuiltinPrompt    = "이 에이전트에는 내장 기본 프롬프트가 없어 복원할 수 없습니다"
+	errMgmtAgentKeyFormat     = "key 需小写字母开头，仅含小写字母/数字/下划线"
+	errMgmtNameEmpty          = "名称不能为空"
+	errMgmtAgentKeyExists     = "该 key 已存在"
+	errMgmtBuiltinNoEditMeta  = "内置 agent 不可修改名称/描述"
+	errMgmtBuiltinNoDelete    = "内置 agent 不可删除"
+	errMgmtLLMProfileIDFormat = "llm_profile_id 格式错误"
+	errMgmtLLMProfileInvalid  = "指定的 LLM 配置不存在或无效"
+	errMgmtNoBuiltinPrompt    = "该 agent 无内置默认提示词，无法恢复"
 
 	// 도구 (뒤에 key 를 이어 붙임)
 	errMgmtToolNotFound   = "도구를 찾을 수 없습니다: "
@@ -125,10 +125,10 @@ const (
 	errMgmtParseRespFail = "응답을 해석하지 못했습니다: "      // 뒤에 err.Error()
 	errMgmtNoModelList   = "모델 목록을 가져오지 못했습니다"
 
-	// 프롬프트 템플릿 편집기 (validateTemplate)
-	errMgmtTmplSyntax  = "템플릿 문법 오류: " // 뒤에 err.Error()
-	errMgmtTmplVarPre  = "변수 {{."
-	errMgmtTmplVarPost = "}} 는 이 에이전트의 허용 목록에 없습니다"
+	// 提示词模板编辑器（validateTemplate）
+	errMgmtTmplSyntax  = "模板语法错误: "
+	errMgmtTmplVarPre  = "变量 {{."
+	errMgmtTmplVarPost = "}} 不在该 agent 允许列表"
 )
 
 // pgReady returns the PG handle, or writes 503 and returns nil if unavailable.
@@ -2184,8 +2184,8 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 // (see agent.nowStr, rendered fresh each turn), so a prompt may always reference
 // {{.Now}} — e.g. subtract it from a fixed start stamp to reason about elapsed time.
 var globalPromptVars = []db.PromptVar{
-	{Name: "Now", Description: "서버 현재 시각(실행할 때마다 실시간으로 갱신되며, 고정된 시작 시각에서 빼면 경과 시간을 계산할 수 있습니다)", Example: "2026-08-11 14:30:00 CST", Source: "runtime"},
-	{Name: "DataDir", Description: "서버 데이터 루트 디렉터리(모든 작업/대화 산출물의 루트이며, 각 에이전트는 그 아래 하위 디렉터리에 실제로 기록합니다. 예: <DataDir>/<taskID>)", Example: "/app/data", Source: "runtime"},
+	{Name: "Now", Description: "服务端当前时间（每次运行实时刷新；可与固定起始时间相减判断已用时长）", Example: "2026-08-11 14:30:00 CST", Source: "runtime"},
+	{Name: "DataDir", Description: "服务端数据根目录（所有任务/会话产物的根；各 agent 实际写盘在其下的子目录，如 <DataDir>/<taskID>）", Example: "/app/data", Source: "runtime"},
 }
 
 // withGlobalVars appends the universal runtime vars onto an agent's own catalog,
