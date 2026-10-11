@@ -95,6 +95,9 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 // budget-triggered settlement; inspect what the model actually receives.
 func TestWorkerRequestsUseSimplifiedChineseThroughSettlement(t *testing.T) {
 	d := testDB(t)
+	oldLanguage := OutputLanguage
+	OutputLanguage = func() string { return "zh" }
+	t.Cleanup(func() { OutputLanguage = oldLanguage })
 	defer d.Close()
 	task, err := d.CreateTask("提示词回归", "读取本地证据", nil, 0, 0)
 	if err != nil {
@@ -170,7 +173,7 @@ func TestWorkerRequestsUseSimplifiedChineseThroughSettlement(t *testing.T) {
 		if strings.ContainsFunc(string(decoded), func(r rune) bool { return unicode.Is(unicode.Hangul, r) }) {
 			t.Fatalf("turn %d sends Korean code-generated content: %s", turn, decoded)
 		}
-		if len(req.System) == 0 || !strings.HasPrefix(req.System[0].Text, "CUSTOM BODY: answer in English.") || !strings.Contains(req.System[0].Text, "【简体中文】") {
+		if len(req.System) == 0 || !strings.HasPrefix(req.System[0].Text, "CUSTOM BODY: answer in English.") || !strings.Contains(req.System[0].Text, "简体中文") {
 			t.Fatalf("turn %d lost override or Chinese directive: %s", turn, decoded)
 		}
 		hasBash := false
